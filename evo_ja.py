@@ -47,6 +47,25 @@ LABEL_NEW = (_new + ' ' * (len(LABEL_OLD) - len(_new.encode('utf-8')))).encode('
 TOKEN = re.compile(r'\{[^}]*\}|<[^>]+>|%[sd]|\\n|v\$')
 KANA = re.compile('[\u3040-\u30ff]')
 
+# \u65e5\u672c\u8a9e\u306f\u82f1\u8a9e\u3088\u308a\u6587\u5b57\u5e45\u304c\u5e83\u304f\u3001\u30e1\u30a4\u30f3\u30e1\u30cb\u30e5\u30fc\u4e0a\u6bb5\u306e\u30bf\u30d6\uff08\u30a2\u30ab\u30c7\u30df\u30fc/\u30c9\u30e9\u30a4\u30d0\u30fc/\u30ae\u30e3\u30e9\u30ea\u30fc\uff09\u3067\u672b\u5c3e\u306e\u300c\u30fc\u300d\u304c
+# \u6b21\u306e\u884c\u306b\u6298\u308a\u8fd4\u3055\u308c\u3066\u3057\u307e\u3046\u3002\u30bf\u30d6\u306e\u5de6\u53f3\u306e\u4f59\u767d\u3092\u8a70\u3081\u3001\u6298\u308a\u8fd4\u3057\u3092\u7981\u6b62\u3059\u308b CSS \u3092\u672b\u5c3e\u306b\u8db3\u3059\u3002
+# \uff08\u3042\u306a\u305f\u306e\u30b2\u30fc\u30e0\u306e CSS \u306e\u5148\u982d\u30a4\u30f3\u30c7\u30f3\u30c8\u3092\u524a\u3063\u3066\u5143\u3088\u308a\u5c0f\u3055\u304f\u3057\u3066\u304b\u3089\u8db3\u3059\u306e\u3067\u3001\u5143\u306e\u67a0\u306b\u305d\u306e\u307e\u307e\u5165\u308b\uff09
+CSS_FILE = 'uiresources\\css\\uicomponents.css'
+CSS_MARK = b'/* ja-fix */'
+CSS_RULE = (b'html[lang="cn"] ks-page-main #panelMenu ks-btnbasic,'
+            b'html[lang="cn"] ks-page-academy #panelMenu ks-btnbasic'
+            b'{padding-left:.5rem;padding-right:.5rem;overflow-wrap:normal;word-break:keep-all;white-space:nowrap}')
+
+
+def css_fix(data):
+    """\u8fd4\u308a\u5024: \u4fee\u6b63\u5f8c\u306e bytes / None=\u3059\u3067\u306b\u4fee\u6b63\u6e08\u307f / False=\u5143\u306e\u67a0\u306b\u5165\u3089\u306a\u3044"""
+    if CSS_MARK in data:
+        return None
+    nl = b'\r\n' if b'\r\n' in data else b'\n'
+    s = re.sub(rb'(?m)^[ \t]+', b'', data)  # \u884c\u982d\u306e\u30a4\u30f3\u30c7\u30f3\u30c8\u3060\u3051\u524a\u308b\uff08\u610f\u5473\u306f\u5909\u308f\u3089\u306a\u3044\uff09
+    s = s.rstrip() + nl + CSS_MARK + nl + CSS_RULE + nl
+    return s if len(s) <= len(data) else False
+
 # 書き込み先(cn の枠)と、足りない時に借りてよい他言語の同種ファイル
 TARGETS = [
     ('cn.loc', ['fr.loc', 'it.loc', 'es.loc', 'de.loc']),
@@ -251,6 +270,15 @@ def plan(pack, built):
             if not ok:
                 it['mode'] = 'no-room'
         items.append(it)
+    # メニューのタブの折り返し対策 CSS
+    if pack.has(CSS_FILE):
+        e = pack.get(CSS_FILE)
+        nd = css_fix(pack.read(e))
+        if nd:
+            items.append({'name': CSS_FILE, 'entry': e, 'data': nd, 'mode': 'in-place', 'offset': e.offset,
+                          'region': (e.offset, e.offset + len(nd))})
+        elif nd is False:
+            print('  （CSS 修正は元の枠に入らないため見送ります。日本語化自体には影響ありません）')
     # 言語名ラベル
     if pack.has(LABEL_FILE):
         e = pack.get(LABEL_FILE)
@@ -350,6 +378,13 @@ def current_state(pack, built):
     return same, total
 
 
+def css_applied(pack):
+    """メニュー折り返し対策の CSS が入っているか（CSS が無い版は True 扱い）"""
+    if not pack.has(CSS_FILE):
+        return True
+    return CSS_MARK in pack.read(pack.get(CSS_FILE))
+
+
 def dirty_donors(pack):
     """借りる側の言語ファイルに日本語（かな）が入っていないか（＝前回の日本語化が残っている）"""
     bad = []
@@ -377,6 +412,7 @@ def cmd_status(pkg):
     same, total = current_state(pack, built)
     applied = os.path.exists(MANIFEST)
     print('今の状態: %s' % ('日本語化済み' if same == total else ('一部だけ日本語' if same else '未適用（元のまま）')))
+    print('メニュー折り返し対策CSS: %s' % ('適用済み' if css_applied(pack) else '未適用'))
     print('このツールのバックアップ: %s' % ('あり' if applied else 'なし'))
     items = plan(pack, built)
     print('書き込み計画:')
@@ -393,9 +429,13 @@ def cmd_apply(pkg, yes):
     built, stats = build_all(pack, tr)
     same, total = current_state(pack, built)
     if os.path.exists(MANIFEST):
-        if same == total:
+        if same == total and css_applied(pack):
             print('すでに日本語化済みです（backup\\ あり）。元に戻すなら revert。')
             return 0
+        if same == total:
+            print('日本語は適用済みですが、メニューの折り返し対策（新しい版の機能）が入っていません。')
+            print('  一度 revert（元に戻す）してから、もう一度 apply してください。')
+            return 1
         print('中止: backup\\ はあるのに、日本語の状態が一致しません。')
         print('  ゲームが更新された/一部だけ元に戻った可能性があります。')
         print('  Steam でファイルの整合性を確認 → backup フォルダを削除 → もう一度 apply してください。')
@@ -497,6 +537,9 @@ def cmd_verify(pkg):
     if pack.has(LABEL_FILE):
         d = pack.read(pack.get(LABEL_FILE))
         print('  言語名の表示: %s' % ('日本語' if d.count(LABEL_NEW) == 1 else ('简体中文のまま' if d.count(LABEL_OLD) == 1 else '不明')))
+    css_ok = css_applied(pack)
+    print('  メニュー折り返し対策CSS: %s' % ('適用済み' if css_ok else '未適用（古い版で適用した場合。revert → apply で入ります）'))
+    bad += not css_ok
     return 1 if bad else 0
 
 
